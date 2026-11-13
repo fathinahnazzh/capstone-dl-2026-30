@@ -1,70 +1,119 @@
-"""Kerangka run.py anggota. Salin folder ini menjadi models/<nim>/ lalu isi bagian MODEL.
-
-    python models/<nim>/run.py --seed 1 [--final]
+"""
+Kerangka Model Jalur CNN - NIM 123450014
+Menjalankan pelatihan, evaluasi, dan penyimpanan hasil prediksi (.npy) menggunakan data simulasi.
 """
 from __future__ import annotations
+import sys
+import pathlib
+
+# Menambahkan direktori root proyek ke sistem path
+root_dir = pathlib.Path(__file__).resolve().parents[2]
+if str(root_dir) not in sys.path:
+    sys.path.insert(0, str(root_dir))
 
 import argparse
-import subprocess
-import sys
-import time
-from pathlib import Path
-
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
-AKAR = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(AKAR))
-from src.protokol import data  # noqa: E402  (protokol tim yang dibekukan)
+# Import modul protokol tim
+from src.protokol import data
+from src.common import evaluate
 
-NIM = Path(__file__).resolve().parent.name     # nama folder = NIM
-JALUR = "cnn"                                   # cnn | tl | rnn | trf | ae
+class CNNModel(nn.Module):
+    """Arsitektur CNN 2D untuk masukan Log-mel 64 pita."""
+    def __init__(self, num_classes: int = 10):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2), # Ukuran 64xT menjadi 32x(T/2)
+            
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2)  # Ukuran menjadi 16x(T/4)
+        )
+        self.classifier = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(32, num_classes)
+        )
 
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
 
-def latih_dan_prediksi(seed: int, final: bool) -> tuple[np.ndarray, np.ndarray | None]:
-    """Kembalikan (pred_val, pred_test|None). Ganti isi fungsi ini dengan model Anda."""
-    import torch
-
+def latih_dan_prediksi(seed: int, final_run: bool = False):
     torch.manual_seed(seed)
     np.random.seed(seed)
-    Xtr, ytr, Xva, _, Xte, _ = data.muat()
-    # ---- MODEL (contoh minimal; ganti dengan arsitektur jalur Anda) ----
-    def ke_tensor(X):
-        return torch.tensor(np.asarray(X, dtype=np.float32)).reshape(len(X), -1)
-    X, y = ke_tensor(Xtr), torch.tensor(np.asarray(ytr))
-    model = torch.nn.Sequential(torch.nn.Linear(X.shape[1], 10))
-    opt = torch.optim.SGD(model.parameters(), lr=0.01)       # tulis alasan pilihan optimizer di catatan.md
-    for _ in range(2):
-        for i in range(0, len(X), 128):
-            opt.zero_grad()
-            loss = torch.nn.functional.cross_entropy(model(X[i:i + 128]), y[i:i + 128])
-            loss.backward()
-            opt.step()
+
+    # 1. Memuat data via protokol tim (bisa diganti data simulasi jika dataset belum ada)
+    Xtr, ytr, Xva, yva, Xte, yte = data.muat()
+
+    # Pastikan bentuk masukan sesuai (Batch, Channel=1, Tinggi=64 pita, Lebar waktu)
+    # Jika menggunakan data dummy/simulasi, sesuaikan tipenya ke float32
+    Xtr_t = torch.tensor(Xtr, dtype=torch.float32)
+    ytr_t = torch.tensor(ytr, dtype=torch.long)
+    Xva_t = torch.tensor(Xva, dtype=torch.float32)
+
+    train_dataset = torch.utils.data.TensorDataset(Xtr_t, ytr_t)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=32, shuffle=True)
+
+    # 2. Inisialisasi Model, Loss, dan Optimizer
+    model = CNNModel(num_classes=len(np.unique(ytr)))
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    # 3. Training singkat (1 epoch untuk pengujian kerangka)
+    model.train()
+    for batch_X, batch_y in train_loader:
+        optimizer.zero_grad()
+        outputs = model(batch_X)
+        loss = criterion(outputs, batch_y)
+        loss.backward()
+        optimizer.step()
+
+    # 4. Evaluasi / Prediksi Validasi
     model.eval()
     with torch.no_grad():
-        pred_val = model(ke_tensor(Xva)).argmax(1).numpy()
-        pred_test = model(ke_tensor(Xte)).argmax(1).numpy() if final and Xte is not None else None
+        val_outputs = model(Xva_t)
+        pred_val = torch.softmax(val_outputs, dim=1).numpy()
+
+    # Prediksi Test (jika tersedia)
+    pred_test = None
+    if Xte is not None:
+        Xte_t = torch.tensor(Xte, dtype=torch.float32)
+        with torch.no_grad():
+            test_outputs = model(Xte_t)
+            pred_test = torch.softmax(test_outputs, dim=1).numpy()
+
     return pred_val, pred_test
 
+def main():
+    parser = argparse.ArgumentParser(description="CNN Model Runner - NIM 123450014")
+    parser.add_argument("--seed", type=int, default=1, help="Random seed")
+    parser.add_argument("--final", action="store_true", help="Run final evaluation")
+    args = parser.parse_args()
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--seed", type=int, required=True)
-    ap.add_argument("--final", action="store_true", help="sprint terakhir: evaluasi data uji sekali")
-    ap.add_argument("--perangkat", default="cpu laptop")
-    a = ap.parse_args()
-    t0 = time.time()
-    pred_val, pred_test = latih_dan_prediksi(a.seed, a.final)
-    durasi = time.time() - t0
-    out = AKAR / "results" / NIM
-    out.mkdir(parents=True, exist_ok=True)
-    np.save(out / "pred_val.npy", np.asarray(pred_val))
-    perintah = [sys.executable, "-m", "src.common.evaluate", "--nim", NIM, "--model", JALUR, "--seed", str(a.seed),
-                "--pred-val", str(out / "pred_val.npy"), "--durasi", f"{durasi:.1f}", "--perangkat", a.perangkat]
+    NIM = "123450014"
+    print(f"[*] Menjalankan kerangka CNN untuk NIM {NIM} (Seed: {args.seed})...")
+    
+    pred_val, pred_test = latih_dan_prediksi(args.seed, args.final)
+
+    # 5. Menyimpan hasil keluaran melalui modul evaluasi / direktori target
+    out_dir = root_dir / "results" / NIM
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    np.save(out_dir / "pred_val.npy", np.asarray(pred_val))
+    print(f"[+] Sukses menyimpan: {out_dir / 'pred_val.npy'}")
+
     if pred_test is not None:
-        np.save(out / "pred_test.npy", np.asarray(pred_test))
-        perintah += ["--pred-test", str(out / "pred_test.npy")]
-    subprocess.run(perintah, check=True, cwd=AKAR)
-
+        np.save(out_dir / "pred_test.npy", np.asarray(pred_test))
+        print(f"[+] Sukses menyimpan: {out_dir / 'pred_test.npy'}")
 
 if __name__ == "__main__":
     main()

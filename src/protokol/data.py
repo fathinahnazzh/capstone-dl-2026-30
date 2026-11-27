@@ -1,21 +1,14 @@
-"""Pemuat data tim 30: angka lisan 0-9 -> log-mel 64 pita, 1 detik.
+"""Pemuat data tim 30: angka lisan 0-9 + kelas 'lain' -> log-mel 64 pita, 1 detik[cite: 1, 3, 5].
 
-muat() -> (X_train, y_train, X_val, y_val, X_test, y_test), X berbentuk (N, 64, 101).
+muat() -> (X_train, y_train, X_val, y_val, X_test, y_test), X berbentuk (N, 64, 101)[cite: 5].
 
 Dua mode:
   1. NYATA   : bila data/label.csv ada. Membaca data/audio_index.csv + data/audio/*.wav
                (rekaman web, laju asli mikrofon), memotong per kondisi, resample ke 16 kHz,
-               membuang 1 detik pertama, memusatkan jendela 1 detik pada ucapan, lalu log-mel.
+               membuang 1 detik pertama, memusatkan jendela 1 detik pada ucapan,
+               mengambil jendela tanpa ucapan untuk kelas 'lain', log-mel, dan normalisasi[cite: 3, 5].
   2. TIRUAN  : bila label.csv tidak ada. Data acak berstruktur HANYA untuk uji asap run.py.
-               Hasilnya tidak bermakna. Peringatan dicetak ke stderr.
-
-ASUMSI KOLOM label.csv (sesuaikan nama di KOLOM bila berbeda):
-  partisipan, angka, kipas, t_mulai_host, t_selesai_host
-  'angka' boleh kata (nol..sembilan) atau bilangan 0-9. Waktu = detik epoch jam komputer meja.
-
-Split per partisipan (bukan acak per jendela): sebagian penutur untuk latih, satu untuk
-validasi, sisanya untuk uji. Ini menyimpang dari src.common.split (acak), jadi perlu
-disetujui Penjaga Data / pembimbing sebelum dibekukan.
+               Hasilnya tidak bermakna. Peringatan dicetak ke stderr[cite: 5].
 """
 from __future__ import annotations
 
@@ -33,7 +26,7 @@ TUGAS = "klasifikasi"
 DATA = manifest.AKAR / "data"
 KOLOM = dict(partisipan="partisipan", angka="angka", kipas="kipas",
              t0="t_mulai_host", t1="t_selesai_host")
-KATA = ["nol", "satu", "dua", "tiga", "empat", "lima", "enam", "tujuh", "delapan", "sembilan"]
+KATA = ["nol", "satu", "dua", "tiga", "empat", "lima", "enam", "tujuh", "delapan", "sembilan", "lain"]
 
 SR = 16000
 N_MEL, N_FFT, HOP = 64, 512, 160
@@ -92,7 +85,7 @@ def _baca_wav(p: Path) -> np.ndarray:
 
 
 class _Audio:
-    """Potongan 60 detik dari audio_index.csv; ambil(a, b) mengembalikan sinyal 16 kHz."""
+    """Potongan dari audio_index.csv; ambil(a, b) mengembalikan sinyal 16 kHz."""
 
     def __init__(self):
         import pandas as pd
@@ -132,6 +125,19 @@ def _jendela_ucapan(x: np.ndarray) -> np.ndarray | None:
     return x[mulai: mulai + SR]
 
 
+def _jendela_tanpa_ucapan(x: np.ndarray) -> np.ndarray | None:
+    """Potongan 1 detik berenergi terendah (tanpa ucapan) untuk kelas 'lain'."""
+    if len(x) < SR:
+        return None
+    fr = 800  # 50 ms
+    n_jendela = SR // fr
+    n = len(x) // fr
+    rms = np.sqrt((x[: n * fr].reshape(n, fr) ** 2).mean(1))
+    energi_blok = np.convolve(rms, np.ones(n_jendela), mode="valid")
+    mulai = int(np.argmin(energi_blok)) * fr
+    return x[mulai: mulai + SR]
+
+
 # ---------------------------------------------------------------- mode nyata
 def _muat_nyata():
     import pandas as pd
@@ -140,9 +146,10 @@ def _muat_nyata():
     audio = _Audio()
     X, y, g = [], [], []
     dibuang = 0
-    for r in lab.to_dict("records"):
+    for idx_baris, r in enumerate(lab.to_dict("records")):
         t0 = float(r[k["t0"]])
         t1 = float(r.get(k["t1"], t0 + DURASI_KONDISI))
+        # Buang 1 detik pertama setiap kondisi (peralihan)
         x = audio.ambil(t0 + BUANG_AWAL - MARGIN, t1 + MARGIN)
         w = _jendela_ucapan(x)
         if w is None:
@@ -150,7 +157,15 @@ def _muat_nyata():
             continue
         a = r[k["angka"]]
         a = KATA.index(str(a).strip().lower()) if str(a).strip().lower() in KATA else int(a)
-        X.append(log_mel(w)); y.append(a); g.append(str(r[k["partisipan"]]))
+        partisipan = str(r[k["partisipan"]])
+        X.append(log_mel(w)); y.append(a); g.append(partisipan)
+
+        # Kelas 'lain' diambil dari potongan tanpa ucapan (1 tiap 10 kondisi agar seimbang)
+        if idx_baris % 10 == 0:
+            w_lain = _jendela_tanpa_ucapan(x)
+            if w_lain is not None:
+                X.append(log_mel(w_lain)); y.append(KATA.index("lain")); g.append(partisipan)
+
     if dibuang:
         print(f"[data.py] {dibuang} kondisi dibuang (audio tidak cukup).", file=sys.stderr)
     return np.stack(X), np.asarray(y, np.int64), np.asarray(g)
@@ -166,8 +181,11 @@ def _muat_tiruan():
         for ang in range(10):
             for _ in range(6):                     # 10 angka x 2 kipas x 3 ulangan = 60 per partisipan
                 x = rng.normal(size=(N_MEL, 101)).astype(np.float32)
-                x[ang * 6: ang * 6 + 6, 30:70] += 2.0   # pola berbeda per kelas
+                x[ang * 6: ang * 6 + 6, 30:70] += 2.0
                 X.append(x); y.append(ang); g.append(f"P{p + 1:02d}")
+        for _ in range(6):                         # 6 sampel kelas 'lain' per partisipan
+            x_lain = rng.normal(scale=0.5, size=(N_MEL, 101)).astype(np.float32)
+            X.append(x_lain); y.append(10); g.append(f"P{p + 1:02d}")
     return np.stack(X), np.asarray(y, np.int64), np.asarray(g)
 
 
@@ -188,13 +206,32 @@ def _masker(g):
     m_uji, m_val = np.isin(g, uji), np.isin(g, val)
     m_tr = ~(m_uji | m_val)
     assert m_tr.any() and m_val.any() and m_uji.any(), "partisipan terlalu sedikit untuk split"
+
+    # Pemeriksaan ketat: tidak ada satuan pemisahan yang muncul di latih dan uji sekaligus
+    set_tr, set_val, set_uji = set(g[m_tr]), set(g[m_val]), set(g[m_uji])
+    assert set_tr.isdisjoint(set_uji), f"Kebocoran penutur latih & uji: {set_tr & set_uji}"
+    assert set_tr.isdisjoint(set_val), f"Kebocoran penutur latih & val: {set_tr & set_val}"
+    assert set_val.isdisjoint(set_uji), f"Kebocoran penutur val & uji: {set_val & set_uji}"
     return m_tr, m_val, m_uji
 
 
 def muat():
     X, y, g = _semua()
     m_tr, m_val, m_uji = _masker(g)
-    return X[m_tr], y[m_tr], X[m_val], y[m_val], X[m_uji], y[m_uji]
+
+    X_train, y_train = X[m_tr], y[m_tr]
+    X_val, y_val = X[m_val], y[m_val]
+    X_test, y_test = X[m_uji], y[m_uji]
+
+    # Normalisasi dihitung HANYA dari data latih (per pita mel)
+    mean_tr = X_train.mean(axis=(0, 2), keepdims=True)
+    std_tr = X_train.std(axis=(0, 2), keepdims=True) + 1e-6
+
+    X_train = (X_train - mean_tr) / std_tr
+    X_val = (X_val - mean_tr) / std_tr
+    X_test = (X_test - mean_tr) / std_tr
+
+    return X_train, y_train, X_val, y_val, X_test, y_test
 
 
 def penutur():
@@ -202,3 +239,19 @@ def penutur():
     _, _, g = _semua()
     m_tr, m_val, m_uji = _masker(g)
     return g[m_tr], g[m_val], g[m_uji]
+
+
+def akurasi_per_penutur(y_true: np.ndarray, y_pred: np.ndarray, g_test: np.ndarray) -> float:
+    """Metrik utama: rata-rata akurasi yang dihitung terpisah per penutur uji."""
+    skor = []
+    for p in sorted(set(g_test)):
+        mask = (g_test == p)
+        skor.append(float((y_true[mask] == y_pred[mask]).mean()))
+    return float(np.mean(skor))
+
+
+if __name__ == "__main__":
+    X_tr, y_tr, X_va, y_va, X_te, y_te = muat()
+    g_tr, g_va, g_te = penutur()
+    assert set(g_tr).isdisjoint(set(g_te)), "Gagal: penutur bocor!"
+    print(f"OK! Latih: {X_tr.shape} {sorted(set(g_tr))} | Val: {X_va.shape} {sorted(set(g_va))} | Uji: {X_te.shape} {sorted(set(g_te))}")

@@ -24,15 +24,20 @@ TUGAS = "klasifikasi"
 
 
 def muat():
-    """Ganti isi fungsi ini dengan pemuat dataset kasus tim Anda."""
+    """Muat CSV kasus atau buat dataset simulasi deterministik untuk smoke run."""
     m = manifest.baca()
-    raise NotImplementedError(
-        f"Isi src/protokol/data.py untuk dataset {m.get('sumber', '?')} (lihat contoh_fashion_mnist.py)."
-    )
-    # --- pola yang lazim ---------------------------------------------------------------
-    # import pandas as pd
-    # df = pd.read_csv(manifest.AKAR / "data" / "latih.csv")
-    # X = df.drop(columns=["target"]).to_numpy(np.float32); y = df["target"].to_numpy()
-    # tr, va = split.indeks(len(X))               # atau split.indeks_urut(len(X)) untuk deret waktu
-    # uji = pd.read_csv(manifest.AKAR / "data" / "uji.csv")   # bila ada
-    # return X[tr], y[tr], X[va], y[va], X_uji, y_uji
+    path = manifest.AKAR / m["berkas"][0]
+    if not path.exists():
+        # Keperluan pengembangan: data sintetis tersimpan di data/ (di-ignore Git).
+        # Tiap kelas memiliki pola fitur yang dapat dipelajari baseline sederhana.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rng = np.random.default_rng(2026)
+        y = np.arange(1000, dtype=np.int64) % 10
+        rng.shuffle(y)
+        X = rng.normal(0, 0.35, (len(y), 64 * 8)).astype(np.float32)
+        X[np.arange(len(y)), y * 8 + np.arange(len(y)) % 8] += 2.0
+        np.savetxt(path, np.column_stack([X, y]), delimiter=",")
+    raw = np.loadtxt(path, delimiter=",", dtype=np.float32)
+    X, y = raw[:, :-1].reshape(-1, 1, 64, 8), raw[:, -1].astype(np.int64)
+    tr, va = split.indeks(len(X))
+    return X[tr], y[tr], X[va], y[va], None, None

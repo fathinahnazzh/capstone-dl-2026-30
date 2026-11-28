@@ -5,6 +5,7 @@ Menjalankan pelatihan, evaluasi, dan penyimpanan hasil prediksi (.npy) menggunak
 from __future__ import annotations
 import sys
 import pathlib
+import time
 
 # Menambahkan direktori root proyek ke sistem path
 root_dir = pathlib.Path(__file__).resolve().parents[2]
@@ -102,18 +103,27 @@ def main():
     NIM = "123450014"
     print(f"[*] Menjalankan kerangka CNN untuk NIM {NIM} (Seed: {args.seed})...")
     
+    t0 = time.time()
     pred_val, pred_test = latih_dan_prediksi(args.seed, args.final)
 
     # 5. Menyimpan hasil keluaran melalui modul evaluasi / direktori target
     out_dir = root_dir / "results" / NIM
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    np.save(out_dir / "pred_val.npy", np.asarray(pred_val))
+    np.save(out_dir / "pred_val.npy", np.asarray(pred_val).argmax(1))
     print(f"[+] Sukses menyimpan: {out_dir / 'pred_val.npy'}")
 
-    if pred_test is not None:
-        np.save(out_dir / "pred_test.npy", np.asarray(pred_test))
+    if args.final and pred_test is not None:
+        np.save(out_dir / "pred_test.npy", np.asarray(pred_test).argmax(1))
         print(f"[+] Sukses menyimpan: {out_dir / 'pred_test.npy'}")
+
+    perintah = [sys.executable, "-m", "src.common.evaluate", "--nim", NIM, "--model", "cnn",
+                "--seed", str(args.seed), "--pred-val", str(out_dir / "pred_val.npy"),
+                "--durasi", f"{time.time() - t0:.1f}", "--perangkat", "cpu laptop"]
+    if args.final and pred_test is not None:
+        perintah += ["--pred-test", str(out_dir / "pred_test.npy")]
+    import subprocess
+    subprocess.run(perintah, check=True, cwd=root_dir)
 
 if __name__ == "__main__":
     main()
